@@ -13,7 +13,7 @@ def process_pdf(input_path: str, output_path: str):
         doc = fitz.open(input_path)
     except Exception as e:
         logger.error(f"  ❌ 读取 {input_path} 失败: {e}")
-        return False
+        return False, ""
         
     # 1. 提取文本用于 NER
     full_text = []
@@ -25,7 +25,7 @@ def process_pdf(input_path: str, output_path: str):
     raw_text = "\n".join(full_text)
     if not raw_text.strip():
         logger.warning(f"  [警告] {os.path.basename(input_path)} 未提取到文本（可能是纯图扫描件，当前版本需可提取文本）。")
-        return False
+        return False, ""
         
     # 2. 分块送给大模型进行实体识别
     text_chunks = chunk_text(raw_text)
@@ -49,4 +49,9 @@ def process_pdf(input_path: str, output_path: str):
     # 4. 保存输出
     doc.save(output_path)
     doc.close()
-    return True
+    
+    clean_text = raw_text
+    for entity in entities:
+        clean_text = clean_text.replace(entity, "[脱敏]")
+        
+    return True, clean_text

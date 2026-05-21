@@ -13,11 +13,11 @@ def process_txt(input_path: str, output_path: str):
             raw_text = f.read()
     except Exception as e:
         logger.error(f"  ❌ 读取 {input_path} 失败: {e}")
-        return False
+        return False, ""
         
     if not raw_text.strip():
         logger.warning(f"  [警告] {os.path.basename(input_path)} 文本为空。")
-        return False
+        return False, ""
         
     # 分块送给大模型进行实体识别
     text_chunks = chunk_text(raw_text)
@@ -32,4 +32,4 @@ def process_txt(input_path: str, output_path: str):
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(clean_text)
         
-    return True
+    return True, clean_text
