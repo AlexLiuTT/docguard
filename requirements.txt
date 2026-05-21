@@ -5,3 +5,5 @@ pydantic==2.9.2
 httpx==0.27.2
 openpyxl
 python-pptx
+numpy
+rapidocr-onnxruntime

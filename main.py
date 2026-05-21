@@ -10,6 +10,7 @@ from pdf_processor import process_pdf
 from txt_processor import process_txt
 from xlsx_processor import process_xlsx
 from pptx_processor import process_pptx
+from img_processor import process_img
 from quality_checker import check_residual_names
 
 # ================= 核心配置区 =================
@@ -101,6 +102,11 @@ def process_all_files():
             success, clean_text = process_xlsx(str(file_path), str(output_path))
         elif ext == ".pptx":
             success, clean_text = process_pptx(str(file_path), str(output_path))
+        elif ext in [".jpg", ".jpeg", ".png"]:
+            # 图片格式输出强制设为 PDF
+            output_path = output_path.with_suffix(".pdf")
+            output_filename = output_path.name
+            success, clean_text = process_img(str(file_path), str(output_path))
         elif ext == ".doc":
             logger.warning(f"  [跳过] 不支持老旧的 .doc 格式，请先另存为 .docx：{file_path.name}")
         else:
