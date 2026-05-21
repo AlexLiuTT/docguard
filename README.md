@@ -70,4 +70,4 @@
 本项目采用 [MIT License](LICENSE) 协议开源。你可以自由使用、修改和分发，但请保留原作者声明。
 
 ---
-*Created with ❤️ by alexliuair & AI.*
+*Created with ❤️ by Alex Liu & AI.*
