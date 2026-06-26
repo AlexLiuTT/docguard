@@ -13,6 +13,13 @@ from pptx_processor import process_pptx
 from img_processor import process_img
 from quality_checker import check_residual_names
 
+from reversible.session_manager import create_session, list_sessions, get_session_files
+from reversible.anonymizer import _build_global_mapping, _save_mapping
+from reversible.restorer import load_mapping, restore_text, restore_docx, check_residual_placeholders
+from docx_processor import process_docx_reversible
+from txt_processor import process_txt_reversible
+from xlsx_processor import process_xlsx_reversible
+
 # ================= 核心配置区 =================
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -59,6 +66,140 @@ def load_processed_record() -> dict:
 
 def save_processed_record(record: dict):
     PROCESSED_RECORD_FILE.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def show_menu() -> str:
+    while True:
+        print("\n" + "=" * 50)
+        print("  DocGuard 文档守卫")
+        print("=" * 50)
+        print("  1. 普通打码（不可逆）")
+        print("  2. 可逆脱敏（生成 mapping）")
+        print("  3. 还原文档（从 mapping 恢复）")
+        print("=" * 50)
+        choice = input("请输入选项编号（1/2/3）：").strip()
+        if choice in ("1", "2", "3"):
+            return choice
+        print("[错误] 无效输入，请输入 1、2 或 3。")
+
+
+def run_reversible_anonymization():
+    ensure_directories()
+    files = [f for f in INPUT_FOLDER.iterdir() if f.is_file() and not f.name.startswith(".")]
+    if not files:
+        logger.info(f"[提示] 请将待处理的文件放入红区目录：\n{INPUT_FOLDER}")
+        return
+
+    session_dir = create_session()
+    logger.info(f"🔑 已创建 Session: {session_dir.name}")
+
+    mapping = _build_global_mapping(session_dir)
+    success_list, fail_list = [], []
+
+    for file_path in files:
+        ext = file_path.suffix.lower()
+        output_filename = f"脱敏_{file_path.name}"
+        output_path = session_dir / output_filename
+        success = False
+        try:
+            if ext == ".docx":
+                success, _ = process_docx_reversible(str(file_path), str(output_path), mapping)
+            elif ext in [".txt", ".md"]:
+                success, _ = process_txt_reversible(str(file_path), str(output_path), mapping)
+            elif ext == ".xlsx":
+                success, _ = process_xlsx_reversible(str(file_path), str(output_path), mapping)
+            else:
+                logger.warning(f"  [跳过] 可逆脱敏暂不支持 {ext}: {file_path.name}")
+                continue
+        except Exception as e:
+            logger.error(f"  ❌ 处理 {file_path.name} 失败: {e}")
+            fail_list.append(file_path.name)
+            continue
+
+        if success:
+            _save_mapping(mapping, session_dir)
+            success_list.append(file_path.name)
+            logger.info(f"    ✅ 已投递至 Session: {output_filename}")
+        else:
+            fail_list.append(file_path.name)
+
+    logger.info(f"\n📊 可逆脱敏完成 — 成功: {len(success_list)}, 失败: {len(fail_list)}")
+    if fail_list:
+        logger.warning(f"  失败文件: {fail_list}")
+    logger.info(f"  mapping.json 已保存至: {session_dir / 'mapping.json'}")
+
+
+def run_restore():
+    sessions = list_sessions()
+    if not sessions:
+        print("\n[提示] 未找到可用的脱敏记录，请先执行可逆脱敏。")
+        return
+
+    print("\n可用的脱敏 Session（最新在前）：")
+    for i, s in enumerate(sessions, 1):
+        print(f"  {i}. {s.name}")
+
+    while True:
+        raw = input("请选择 Session 编号：").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(sessions):
+            session_dir = sessions[int(raw) - 1]
+            break
+        print("[错误] 无效编号，请重新输入。")
+
+    try:
+        mapping = load_mapping(session_dir)
+    except ValueError as e:
+        print(f"[错误] {e}")
+        return
+
+    files = get_session_files(session_dir)
+    if not files:
+        print("[提示] 该 Session 内没有可还原的文件。")
+        return
+
+    print("\n可还原的文件：")
+    for i, f in enumerate(files, 1):
+        print(f"  {i}. {f.name}")
+    print(f"  0. 还原全部")
+
+    while True:
+        raw = input("请选择文件编号（0 为全部）：").strip()
+        if raw == "0":
+            targets = files
+            break
+        elif raw.isdigit() and 1 <= int(raw) <= len(files):
+            targets = [files[int(raw) - 1]]
+            break
+        print("[错误] 无效编号，请重新输入。")
+
+    for file_path in targets:
+        ext = file_path.suffix.lower()
+        output_path = session_dir / f"还原_{file_path.name}"
+        try:
+            if ext == ".docx":
+                ok = restore_docx(str(file_path), str(output_path), mapping)
+            elif ext in [".txt", ".md"]:
+                text = file_path.read_text(encoding="utf-8")
+                restored = restore_text(text, mapping)
+                warnings = check_residual_placeholders(restored, mapping)
+                for w in warnings:
+                    logger.warning(f"    ⚠️  {w}")
+                output_path.write_text(restored, encoding="utf-8")
+                ok = True
+            elif ext == ".xlsx":
+                print(f"  [提示] .xlsx 文件暂不支持还原，请手动处理：{file_path.name}")
+                continue
+            else:
+                print(f"  [跳过] 不支持还原格式 {ext}: {file_path.name}")
+                continue
+        except Exception as e:
+            logger.error(f"  ❌ 还原 {file_path.name} 失败: {e}")
+            continue
+
+        if ok:
+            logger.info(f"    ✅ 还原完成: {output_path.name}")
+        else:
+            logger.error(f"    ❌ 还原失败: {file_path.name}")
+
 
 def process_all_files():
     ensure_directories()
@@ -145,5 +286,11 @@ if __name__ == "__main__":
     logger.info("=" * 50)
     logger.info("  DocGuard 守卫版（支持 Word/PDF/Excel/PPT/TXT 原生脱敏）")
     logger.info("=" * 50)
-    process_all_files()
-    logger.info("🎉 批量脱敏任务结束。")
+    choice = show_menu()
+    if choice == "1":
+        process_all_files()
+        logger.info("🎉 批量脱敏任务结束。")
+    elif choice == "2":
+        run_reversible_anonymization()
+    elif choice == "3":
+        run_restore()
