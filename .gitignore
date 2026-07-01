@@ -21,3 +21,18 @@ logs/
 # IDE 配置文件
 .idea/
 .vscode/
+
+# 本地交接文档
+HANDOFF.md
+
+# 还原输入区（大模型生成文件，可能含敏感信息）
+restore/
+
+# WorkBuddy 本地工作目录
+.workbuddy/
+
+# Kiro 规格目录（本地开发用）
+.kiro/
+
+# 处理记录缓存
+.processed.json

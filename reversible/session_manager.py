@@ -29,8 +29,8 @@ def list_sessions() -> list[Path]:
 
 
 def get_session_files(session_dir: Path) -> list[Path]:
-    """返回 session 文件夹内所有可还原文件（.docx / .md / .txt），排除还原_ 前缀的文件。"""
-    exts = {".docx", ".md", ".txt"}
+    """返回 session 文件夹内所有可还原文件（.docx / .md / .txt / .pdf / .xlsx），排除还原_ 前缀的文件。"""
+    exts = {".docx", ".md", ".txt", ".pdf", ".xlsx"}
     return [
         f for f in session_dir.iterdir()
         if f.is_file()

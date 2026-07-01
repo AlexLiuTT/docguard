@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from docx_processor import process_docx
-from pdf_processor import process_pdf
+from pdf_processor import process_pdf, process_pdf_reversible
 from txt_processor import process_txt
 from xlsx_processor import process_xlsx
 from pptx_processor import process_pptx
@@ -15,7 +15,7 @@ from quality_checker import check_residual_names
 
 from reversible.session_manager import create_session, list_sessions, get_session_files
 from reversible.anonymizer import _build_global_mapping, _save_mapping
-from reversible.restorer import load_mapping, restore_text, restore_docx, check_residual_placeholders
+from reversible.restorer import load_mapping, restore_text, restore_docx, restore_pdf, restore_xlsx, check_residual_placeholders
 from docx_processor import process_docx_reversible
 from txt_processor import process_txt_reversible
 from xlsx_processor import process_xlsx_reversible
@@ -25,6 +25,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 INPUT_FOLDER = SCRIPT_DIR / "input"
 OUTPUT_FOLDER = SCRIPT_DIR / "output"
+RESTORE_FOLDER = SCRIPT_DIR / "restore"   # 还原输入区：放待还原的外部文件
 LOG_FOLDER = SCRIPT_DIR / "logs"
 PROCESSED_RECORD_FILE = SCRIPT_DIR / ".processed.json"
 
@@ -49,6 +50,7 @@ logger = setup_logging()
 def ensure_directories():
     INPUT_FOLDER.mkdir(parents=True, exist_ok=True)
     OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+    RESTORE_FOLDER.mkdir(parents=True, exist_ok=True)
 
 def compute_file_fingerprint(file_path: Path) -> str:
     """基于文件名、大小和修改时间生成指纹。"""
@@ -100,13 +102,16 @@ def run_reversible_anonymization():
         output_filename = f"脱敏_{file_path.name}"
         output_path = session_dir / output_filename
         success = False
+        clean_text = ""
         try:
             if ext == ".docx":
-                success, _ = process_docx_reversible(str(file_path), str(output_path), mapping)
+                success, clean_text = process_docx_reversible(str(file_path), str(output_path), mapping)
             elif ext in [".txt", ".md"]:
-                success, _ = process_txt_reversible(str(file_path), str(output_path), mapping)
+                success, clean_text = process_txt_reversible(str(file_path), str(output_path), mapping)
             elif ext == ".xlsx":
-                success, _ = process_xlsx_reversible(str(file_path), str(output_path), mapping)
+                success, clean_text = process_xlsx_reversible(str(file_path), str(output_path), mapping)
+            elif ext == ".pdf":
+                success, clean_text = process_pdf_reversible(str(file_path), str(output_path), mapping)
             else:
                 logger.warning(f"  [跳过] 可逆脱敏暂不支持 {ext}: {file_path.name}")
                 continue
@@ -119,6 +124,16 @@ def run_reversible_anonymization():
             _save_mapping(mapping, session_dir)
             success_list.append(file_path.name)
             logger.info(f"    ✅ 已投递至 Session: {output_filename}")
+
+            # 生成 MD 文件（供下游大模型分析）
+            if clean_text:
+                import datetime
+                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                md_filename = f"脱敏_{file_path.stem}.md"
+                md_path = session_dir / md_filename
+                header = f"---\n原始文件: {file_path.name}\n输出时间: {now_str}\nsession: {session_dir.name}\n---\n\n"
+                md_path.write_text(header + clean_text, encoding="utf-8")
+                logger.info(f"    📝 已生成 MD 文件: {md_filename}")
         else:
             fail_list.append(file_path.name)
 
@@ -129,6 +144,14 @@ def run_reversible_anonymization():
 
 
 def run_restore():
+    """
+    还原流程：
+    1. 选择 Session（获取 mapping.json 作为"密钥"）
+    2. 用户将大模型生成的新文件（答辩状、自证意见等，含占位符）放入 restore/ 文件夹
+    3. 程序扫描 restore/，将占位符替换回原文
+    4. 输出到 Session 文件夹内
+    """
+    # 1. 选 Session
     sessions = list_sessions()
     if not sessions:
         print("\n[提示] 未找到可用的脱敏记录，请先执行可逆脱敏。")
@@ -151,29 +174,31 @@ def run_restore():
         print(f"[错误] {e}")
         return
 
-    files = get_session_files(session_dir)
+    # 打印 mapping 摘要，让用户确认
+    print(f"\n📋 该 Session 共 {len(mapping.mappings)} 个映射：")
+    for ph, entry in list(mapping.mappings.items())[:10]:
+        print(f"    {ph} → {entry['original']}")
+    if len(mapping.mappings) > 10:
+        print(f"    ...（共 {len(mapping.mappings)} 个）")
+
+    # 2. 扫描 restore/ 文件夹
+    RESTORE_FOLDER.mkdir(parents=True, exist_ok=True)
+    files = [f for f in RESTORE_FOLDER.iterdir() if f.is_file() and not f.name.startswith(".")]
     if not files:
-        print("[提示] 该 Session 内没有可还原的文件。")
+        print(f"\n[提示] 请将需要还原的文件（大模型生成的答辩状、自证意见等）放入：\n  {RESTORE_FOLDER}")
+        print("放入后重新运行还原即可。")
         return
 
-    print("\n可还原的文件：")
+    print(f"\n📂 在 restore/ 文件夹中找到 {len(files)} 个文件：")
     for i, f in enumerate(files, 1):
         print(f"  {i}. {f.name}")
-    print(f"  0. 还原全部")
 
-    while True:
-        raw = input("请选择文件编号（0 为全部）：").strip()
-        if raw == "0":
-            targets = files
-            break
-        elif raw.isdigit() and 1 <= int(raw) <= len(files):
-            targets = [files[int(raw) - 1]]
-            break
-        print("[错误] 无效编号，请重新输入。")
-
-    for file_path in targets:
+    # 3. 逐个还原
+    success_list, fail_list = [], []
+    for file_path in files:
         ext = file_path.suffix.lower()
         output_path = session_dir / f"还原_{file_path.name}"
+        ok = False
         try:
             if ext == ".docx":
                 ok = restore_docx(str(file_path), str(output_path), mapping)
@@ -182,23 +207,32 @@ def run_restore():
                 restored = restore_text(text, mapping)
                 warnings = check_residual_placeholders(restored, mapping)
                 for w in warnings:
-                    logger.warning(f"    ⚠️  {w}")
+                    logger.warning(f"    ⚠️  {file_path.name}: {w}")
                 output_path.write_text(restored, encoding="utf-8")
                 ok = True
             elif ext == ".xlsx":
-                print(f"  [提示] .xlsx 文件暂不支持还原，请手动处理：{file_path.name}")
-                continue
+                ok = restore_xlsx(str(file_path), str(output_path), mapping)
+            elif ext == ".pdf":
+                ok = restore_pdf(str(file_path), str(output_path), mapping)
             else:
-                print(f"  [跳过] 不支持还原格式 {ext}: {file_path.name}")
+                logger.warning(f"  [跳过] 不支持还原格式 {ext}: {file_path.name}")
                 continue
         except Exception as e:
             logger.error(f"  ❌ 还原 {file_path.name} 失败: {e}")
+            fail_list.append(file_path.name)
             continue
 
         if ok:
-            logger.info(f"    ✅ 还原完成: {output_path.name}")
+            success_list.append(file_path.name)
+            logger.info(f"    ✅ 已还原: {file_path.name} → {output_path.name}")
         else:
-            logger.error(f"    ❌ 还原失败: {file_path.name}")
+            fail_list.append(file_path.name)
+
+    logger.info(f"\n📊 还原完成 — 成功: {len(success_list)}, 失败: {len(fail_list)}")
+    if success_list:
+        logger.info(f"  输出位置: {session_dir}")
+    if fail_list:
+        logger.warning(f"  失败文件: {fail_list}")
 
 
 def process_all_files():
@@ -283,6 +317,7 @@ def process_all_files():
             save_processed_record(record)
 
 if __name__ == "__main__":
+    ensure_directories()
     logger.info("=" * 50)
     logger.info("  DocGuard 守卫版（支持 Word/PDF/Excel/PPT/TXT 原生脱敏）")
     logger.info("=" * 50)
